@@ -214,6 +214,8 @@ int main(int argc, char *argv[])
 
 	const struct ibdiag_opt opts[] = {
 		{"string", 's', 0, NULL, ""},
+		{"queue_depth", 'N', 0, NULL, ""},
+		{"run_time", 't', 0, NULL, ""},
 		{}
 	};
 	char usage_args[] = "<dlid|dr_path> <attr> [mod]";
@@ -296,7 +298,7 @@ int main(int argc, char *argv[])
 
 	length = IB_MAD_SIZE;
 	for (i = 0; i < N; ++i) {
-		if (umad_send(portid, mad_agent, umad, length, ibd_timeout, ibd_retries) < 0) {
+		if (umad_send(portid, mad_agent, smp_query_tasks[i].umad, length, ibd_timeout, -1) < 0) {
 			IBPANIC("send failed");
 			exit (-1);
 		}
@@ -306,7 +308,7 @@ int main(int argc, char *argv[])
 	}
 
 	while(!do_poll) {
-		//do_poll = umad_poll(portid, 1);
+		do_poll = umad_poll(portid, 1);
 
 		if (do_poll && do_poll != -ETIMEDOUT)
 			IBPANIC("poll failed");
@@ -346,16 +348,15 @@ int main(int argc, char *argv[])
 			gettimeofday(&smp_query_tasks[j].t1, NULL);
 
 			elapsedTime = (t2.tv_sec - smp_query_tasks[j].t1.tv_sec) * 1000000 + (t2.tv_usec - smp_query_tasks[j].t1.tv_usec);
-			if (minTime > elapsedTime)
+			if (!minTime || minTime > elapsedTime)
 				minTime = elapsedTime;
-			if (!maxTime || maxTime < elapsedTime)
+			if (maxTime < elapsedTime)
 				maxTime = elapsedTime;
 			totalTime += elapsedTime;
 			avrgTime = totalTime / total_mads;
 
 		} else {
-			//IBPANIC("can't find tid %lld", tid);
-			//continue;
+			IBPANIC("can't find tid %lld", tid);
 		}
 		
 		gettimeofday(&end, NULL);
