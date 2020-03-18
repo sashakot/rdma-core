@@ -176,6 +176,9 @@ int main(int argc, char *argv[])
 	DRPath path;
 	uint8_t *desc;
 	int length;
+	struct timeval t1, t2;
+    double elapsedTime;
+	int N = 1;
 
 	const struct ibdiag_opt opts[] = {
 		{"string", 's', 0, NULL, ""},
@@ -213,6 +216,10 @@ int main(int argc, char *argv[])
 	attr = strtoul(argv[1], NULL, 0);
 	if (argc > 2)
 		mod = strtoul(argv[2], NULL, 0);
+	if (argc > 3)
+		N = strtoul(argv[3], NULL, 0);
+	if (argc > 4)
+		ibd_timeout = strtoul(argv[4], NULL, 0);
 
 	if (umad_init() < 0)
 		IBPANIC("can't init UMAD library");
@@ -236,12 +243,29 @@ int main(int argc, char *argv[])
 	if (ibdebug > 1)
 		xdump(stderr, "before send:\n", smp, 256);
 
-	length = IB_MAD_SIZE;
-	if (umad_send(portid, mad_agent, umad, length, ibd_timeout, 0) < 0)
-		IBPANIC("send failed");
+	gettimeofday(&t1, NULL);
 
-	if (umad_recv(portid, umad, &length, -1) != mad_agent)
-		IBPANIC("recv error: %s", strerror(errno));
+	length = IB_MAD_SIZE;
+	for (int n = 0; n < N; ++n) {
+		smp->tid = htobe64(drmad_tid);
+		drmad_tid++;
+		if (umad_send(portid, mad_agent, umad, length, ibd_timeout, 0) < 0) {
+			IBPANIC("send failed");
+			exit (-1);
+		}
+	}
+
+	for (int n = 0; n < N; ++n) {
+		if (umad_recv(portid, umad, &length, -1) != mad_agent) {
+			IBPANIC("recv error: %s", strerror(errno));
+			exit (-1);
+		}
+	}
+	
+	gettimeofday(&t2, NULL);
+	elapsedTime = (t2.tv_sec - t1.tv_sec) * 1000.0;      // sec to ms
+    elapsedTime += (t2.tv_usec - t1.tv_usec) / 1000.0;   // us to ms
+    fprintf(stderr, "elapsedTime : %f ms.  N %d per MAD %f\n", elapsedTime, N, elapsedTime/N);
 
 	if (ibdebug)
 		fprintf(stderr, "%d bytes received\n", length);
