@@ -249,7 +249,7 @@ int main(int argc, char *argv[])
 	for (int n = 0; n < N; ++n) {
 		smp->tid = htobe64(drmad_tid);
 		drmad_tid++;
-		if (umad_send(portid, mad_agent, umad, length, ibd_timeout, 0) < 0) {
+		if (umad_send(portid, mad_agent, umad, length, ibd_timeout, -1) < 0) {
 			IBPANIC("send failed");
 			exit (-1);
 		}
