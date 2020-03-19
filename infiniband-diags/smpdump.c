@@ -180,6 +180,9 @@ static int process_opt(void *context, int ch)
 	case 'r':
 		ibd_retries = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
+	case 'T':
+		ibd_timeout = (uint64_t) strtoull(optarg, NULL, 0);
+		break;
 	default:
 		return -1;
 	}
@@ -226,6 +229,7 @@ int main(int argc, char *argv[])
 		{"run_time", 't', 1, "<time>", ""},
 		{"mngt_method", 'm', 1, "<method>", ""},
 		{"umad_retries", 'r', 1, "<retries>", ""},
+		{"umad_timeout", 'T', 1, "<timeout ms>", ""},
 		{}
 	};
 	char usage_args[] = "<dlid|dr_path> <attr> [mod]";
