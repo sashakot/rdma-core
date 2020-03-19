@@ -338,6 +338,7 @@ int main(int argc, char *argv[])
 		else if (do_poll)
 			IBPANIC("poll failed");
 	
+		length = IB_MAD_SIZE;
 		if (umad_recv(portid, umad, &length, -1) != mad_agent) {
 			IBPANIC("recv error: %s", strerror(errno));
 			exit (-1);
@@ -405,8 +406,8 @@ int main(int argc, char *argv[])
 	printf("# of MADs %ld , # of timeouts %ld\n", total_mads, timeout_mads);
 	printf("Min latency %ld us , Max latency %ld us, Average latency %d us\n", minTime, maxTime, (int)(totalTime / total_mads));
     printf("Sent bytes %ld , Recv bytes %ld\n", totalSend, totalRecv);
-	printf("Send BW [MB/s] %f\n", totalSend/1024/1024/runTime);
-	printf("Send MADS/s %d\n", (int) (total_mads / runTime));
+	printf("Send BW [MB/s] %.1d\n", (double)totalSend/1024/1024/runTime);
+	printf("Send MADS/s %.1f\n", (float)total_mads / runTime);
 	//printf("Recv BW [MB/s] %d", 1000000*totalRecv/1024/1024/totalTime);
 
 	if (ibdebug)
