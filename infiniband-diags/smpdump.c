@@ -46,6 +46,7 @@
 
 #include <sys/time.h>
 
+
 #include <ibdiag_common.h>
 
 static int mad_agent;
@@ -214,8 +215,8 @@ int main(int argc, char *argv[])
 
 	const struct ibdiag_opt opts[] = {
 		{"string", 's', 0, NULL, ""},
-		{"queue_depth", 'N', 0, NULL, ""},
-		{"run_time", 't', 0, NULL, ""},
+		{"queue_depth", 'N', 1, "<queue_depth>", ""},
+		{"run_time", 't', 1, "<time>", ""},
 		{}
 	};
 	char usage_args[] = "<dlid|dr_path> <attr> [mod]";
@@ -298,8 +299,9 @@ int main(int argc, char *argv[])
 
 	length = IB_MAD_SIZE;
 	for (i = 0; i < N; ++i) {
-		if (umad_send(portid, mad_agent, smp_query_tasks[i].umad, length, ibd_timeout, -1) < 0) {
-			IBPANIC("send failed");
+		int rc;
+		if (rc = umad_send(portid, mad_agent, smp_query_tasks[i].umad, length, ibd_timeout, -1) < 0) {
+			IBPANIC("send failed rc : %d", rc);
 			exit (-1);
 		}
 		gettimeofday(&smp_query_tasks[i].t1, NULL);
@@ -340,12 +342,7 @@ int main(int argc, char *argv[])
 				break;
 		}
 		if(j < N) {
-			if (umad_send(portid, mad_agent, smp_query_tasks[j].umad, length, ibd_timeout, ibd_retries) < 0) {
-				IBPANIC("send failed");
-				exit (-1);
-			}
-			total_mads++;
-			gettimeofday(&smp_query_tasks[j].t1, NULL);
+			int rc;
 
 			elapsedTime = (t2.tv_sec - smp_query_tasks[j].t1.tv_sec) * 1000000 + (t2.tv_usec - smp_query_tasks[j].t1.tv_usec);
 			if (!minTime || minTime > elapsedTime)
@@ -355,6 +352,13 @@ int main(int argc, char *argv[])
 			totalTime += elapsedTime;
 			avrgTime = totalTime / total_mads;
 
+			if (rc = umad_send(portid, mad_agent, smp_query_tasks[j].umad, length, ibd_timeout, ibd_retries) < 0) {
+				IBPANIC("send failed rc : %d", rc);
+				exit (-1);
+			}
+			total_mads++;
+			totalSend += length;
+			gettimeofday(&smp_query_tasks[j].t1, NULL);
 		} else {
 			IBPANIC("can't find tid %lld", tid);
 		}
@@ -366,9 +370,10 @@ int main(int argc, char *argv[])
 	}
 	
 	printf("# of MADs %ld , # of timeouts %ld\n", total_mads, timeout_mads);
-	printf("Min latency %ld us , Max latency %ld us, Average latency %ld us\n", minTime, maxTime, avrgTime);
+	printf("Min latency %ld us , Max latency %ld us, Average latency %ld us\n", minTime, maxTime, totalTime / total_mads);
     printf("Sent bytes %ld , Recv bytes %ld\n", totalSend, totalRecv);
 	printf("Send BW [MB/s] %f\n", totalSend/1024/1024/runTime);
+	printf("Send MADS/s %d\n", (int) (total_mads / runTime));
 	//printf("Recv BW [MB/s] %d", 1000000*totalRecv/1024/1024/totalTime);
 
 	if (ibdebug)
