@@ -324,7 +324,7 @@ int main(int argc, char *argv[])
 	}
 
 	while(!do_poll) {
-		do_poll = umad_poll(portid, -1);
+		do_poll = umad_poll(portid, t_sec * 1000);
 
 		if (do_poll && do_poll != -ETIMEDOUT)
 			IBPANIC("poll failed");
