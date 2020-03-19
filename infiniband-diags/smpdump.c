@@ -217,6 +217,7 @@ int main(int argc, char *argv[])
 		{"string", 's', 0, NULL, ""},
 		{"queue_depth", 'N', 1, "<queue_depth>", ""},
 		{"run_time", 't', 1, "<time>", ""},
+		{"mngt_method", 'm', 1, "<method>", ""},
 		{}
 	};
 	char usage_args[] = "<dlid|dr_path> <attr> [mod]";
@@ -290,6 +291,8 @@ int main(int argc, char *argv[])
 			drsmp_get_init(smp_query_tasks[i].umad, &path, attr, mod);
 		else
 			smp_get_init(smp_query_tasks[i].umad, dlid, attr, mod);
+		
+		memset(smp_query_tasks[i].smp->data,0xff,64);
 	}
 
 	if (ibdebug > 1)
