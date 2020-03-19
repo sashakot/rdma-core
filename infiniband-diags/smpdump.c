@@ -324,19 +324,28 @@ int main(int argc, char *argv[])
 	}
 
 	while(!do_poll) {
+		be64_t tid;
+		int status;
+
 		do_poll = umad_poll(portid, t_sec * 1000);
 
-		if (do_poll && do_poll != -ETIMEDOUT)
-			IBPANIC("poll failed");
-			
 		if (do_poll == -ETIMEDOUT)
-			timeout_mads++;
+			break;
+		else if (do_poll)
+			IBPANIC("poll failed");
 	
-		be64_t tid;
-		
 		if (umad_recv(portid, umad, &length, -1) != mad_agent) {
 			IBPANIC("recv error: %s", strerror(errno));
 			exit (-1);
+		}
+
+		status = umad_status(umad);
+		if (status == ETIMEDOUT) {
+			printf("timeout_ms %d retries %d \n", mad->timeout_ms, mad->retries);
+			timeout_mads++;
+			continue;
+		} else if (status) {
+			IBPANIC("umad error: %d %s", status, strerror(errno));
 		}
 
 		gettimeofday(&t2, NULL);
@@ -345,7 +354,6 @@ int main(int argc, char *argv[])
 		if (smp->status) {
 			fprintf(stdout, "SMP status: 0x%x\n",
 				ntohs(smp->status));
-			goto exit;
 		}
 
 		tid = smp->tid >> 32;
@@ -368,10 +376,8 @@ int main(int argc, char *argv[])
 			if (mgmt_class == IB_SMI_DIRECT_CLASS)
 				drsmp_get_init(smp_query_tasks[j].umad, &path, attr, mod);
 			else
-				smp_get_init(smp_query_tasks[j].umad, dlid, attr, mod);
-
-			if (mad->retries)	
-				printf("timeout_ms %d retries %d \n", mad->timeout_ms, mad->retries);
+				smp_get_init(smp_query_tasks[j].umad, dlid, attr, mod);	
+				
 			smp_query_tasks[j].on_wire = 0;
 
 			if (rc = umad_send(portid, mad_agent, smp_query_tasks[j].umad, length, ibd_timeout, ibd_retries) < 0) {
