@@ -54,6 +54,7 @@ static int drmad_tid = 0x123;
 static int mngt_method = 0x01; // 1 - Get, 2 - Set
 static uint64_t N = 1;
 static int t_sec = 1;
+static int ibd_retries = 3;
 
 typedef struct {
 	char path[64];
@@ -176,6 +177,9 @@ static int process_opt(void *context, int ch)
 	case 't':
 		t_sec = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
+	case 'r':
+		ibd_retries = (uint64_t) strtoull(optarg, NULL, 0);
+		break;
 	default:
 		return -1;
 	}
@@ -185,7 +189,9 @@ static int process_opt(void *context, int ch)
 struct smp_query_task {
 	void *umad;
 	struct drsmp *smp;
+	struct ib_user_mad *mad;
 	struct timeval t1;
+	int on_wire;
 };
 
 #pragma GCC diagnostic push
@@ -196,6 +202,7 @@ int main(int argc, char *argv[])
 	int dlid = 0;
 	void *umad;
 	struct drsmp *smp;
+	struct ib_user_mad *mad;
 	int i, j, portid, mod = 0, attr;
 	DRPath path;
 	uint8_t *desc;
@@ -208,7 +215,7 @@ int main(int argc, char *argv[])
 	int do_poll = 0;
 	uint64_t total_mads = 0;
 	uint64_t timeout_mads = 0;
-	uint64_t minTime = 0, maxTime = 0, avrgTime = 0, totalTime = 0;
+	uint64_t minTime = 0, maxTime = 0, totalTime = 0;
 	uint64_t totalSend = 0, totalRecv = 0;
 	double runTime = 0;
 
@@ -218,6 +225,7 @@ int main(int argc, char *argv[])
 		{"queue_depth", 'N', 1, "<queue_depth>", ""},
 		{"run_time", 't', 1, "<time>", ""},
 		{"mngt_method", 'm', 1, "<method>", ""},
+		{"umad_retries", 'r', 1, "<retries>", ""},
 		{}
 	};
 	char usage_args[] = "<dlid|dr_path> <attr> [mod]";
@@ -231,9 +239,8 @@ int main(int argc, char *argv[])
 		NULL
 	};
 
-	ibd_timeout = 1000;
-	int ibd_retries = 0;
-
+	ibd_timeout = 10000;
+	
 	ibdiag_process_opts(argc, argv, NULL, "GKs", opts, process_opt,
 			    usage_args, usage_examples);
 
@@ -275,6 +282,7 @@ int main(int argc, char *argv[])
 		IBPANIC("can't alloc MAD");
 
 	smp = umad_get_mad(umad);
+	mad = (struct ib_user_mad*)umad;
 
 	smp_query_tasks = (struct smp_query_task*)malloc(N * sizeof(smp_query_tasks[0]));
 	if (!smp_query_tasks)
@@ -286,6 +294,7 @@ int main(int argc, char *argv[])
 			IBPANIC("can't alloc MAD");
 
 		smp_query_tasks[i].smp = umad_get_mad(smp_query_tasks[i].umad);
+		smp_query_tasks[i].mad = (struct ib_user_mad *)smp_query_tasks[i].umad;
 
 		if (mgmt_class == IB_SMI_DIRECT_CLASS)
 			drsmp_get_init(smp_query_tasks[i].umad, &path, attr, mod);
@@ -293,6 +302,7 @@ int main(int argc, char *argv[])
 			smp_get_init(smp_query_tasks[i].umad, dlid, attr, mod);
 		
 		memset(smp_query_tasks[i].smp->data,0xff,64);
+		smp_query_tasks[i].on_wire = 0;
 	}
 
 	if (ibdebug > 1)
@@ -308,12 +318,13 @@ int main(int argc, char *argv[])
 			exit (-1);
 		}
 		gettimeofday(&smp_query_tasks[i].t1, NULL);
+		smp_query_tasks[i].on_wire = 1;
 		total_mads++;
 		totalSend += length;
 	}
 
 	while(!do_poll) {
-		do_poll = umad_poll(portid, 1);
+		do_poll = umad_poll(portid, -1);
 
 		if (do_poll && do_poll != -ETIMEDOUT)
 			IBPANIC("poll failed");
@@ -322,7 +333,7 @@ int main(int argc, char *argv[])
 			timeout_mads++;
 	
 		be64_t tid;
-
+		
 		if (umad_recv(portid, umad, &length, -1) != mad_agent) {
 			IBPANIC("recv error: %s", strerror(errno));
 			exit (-1);
@@ -353,15 +364,24 @@ int main(int argc, char *argv[])
 			if (maxTime < elapsedTime)
 				maxTime = elapsedTime;
 			totalTime += elapsedTime;
-			avrgTime = totalTime / total_mads;
+
+			if (mgmt_class == IB_SMI_DIRECT_CLASS)
+				drsmp_get_init(smp_query_tasks[j].umad, &path, attr, mod);
+			else
+				smp_get_init(smp_query_tasks[j].umad, dlid, attr, mod);
+
+			if (mad->retries)	
+				printf("timeout_ms %d retries %d \n", mad->timeout_ms, mad->retries);
+			smp_query_tasks[j].on_wire = 0;
 
 			if (rc = umad_send(portid, mad_agent, smp_query_tasks[j].umad, length, ibd_timeout, ibd_retries) < 0) {
-				IBPANIC("send failed rc : %d", rc);
-				exit (-1);
+				timeout_mads++;
+				continue;
 			}
 			total_mads++;
 			totalSend += length;
 			gettimeofday(&smp_query_tasks[j].t1, NULL);
+			smp_query_tasks[j].on_wire = 1;
 		} else {
 			IBPANIC("can't find tid %lld", tid);
 		}
@@ -373,7 +393,7 @@ int main(int argc, char *argv[])
 	}
 	
 	printf("# of MADs %ld , # of timeouts %ld\n", total_mads, timeout_mads);
-	printf("Min latency %ld us , Max latency %ld us, Average latency %ld us\n", minTime, maxTime, totalTime / total_mads);
+	printf("Min latency %ld us , Max latency %ld us, Average latency %d us\n", minTime, maxTime, (int)(totalTime / total_mads));
     printf("Sent bytes %ld , Recv bytes %ld\n", totalSend, totalRecv);
 	printf("Send BW [MB/s] %f\n", totalSend/1024/1024/runTime);
 	printf("Send MADS/s %d\n", (int) (total_mads / runTime));
