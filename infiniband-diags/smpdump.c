@@ -49,12 +49,54 @@
 
 #include <ibdiag_common.h>
 
-static int mad_agent;
 static int drmad_tid = 0x123;
-static int mngt_method = 0x01; // 1 - Get, 2 - Set
-static uint64_t N = 1;
 static int t_sec = 1;
-static int ibd_retries = 3;
+
+struct mad_operation {
+	void *umad;
+	struct drsmp *smp;
+	struct ib_user_mad *mad;
+};
+
+struct mad_worker {
+	/*
+	umad params
+	*/
+	int ibd_timeout;
+	int ibd_retries;
+
+	/*
+	mad attributes
+	*/
+	int mgmt_class; // IB_SMI_DIRECT_CLASS , IB_SMI_CLASS
+	int mngt_method; // 1 - Get, 2 - Set
+	
+	/*
+	IB Device
+	*/
+	char ibd_ca[UMAD_CA_NAME_LEN];
+	int ibd_ca_port;
+	int mad_agent;
+	int portid;
+
+	/*
+	runtime
+	*/
+	int mad_queue_depth;
+	struct mad_operation recv_mad;
+
+	/*
+	statistics
+	*/
+	uint64_t total_mads;
+	uint64_t timeout_mads;
+	uint64_t send_mads;
+};
+
+int init_mad_worker(struct mad_worker *w);
+int init_ib_device(struct mad_worker *w, const char *ibd_ca, int ibd_ca_port);
+void finalize_mad_worker(struct mad_worker *w);
+void check_worker(const struct mad_worker *w);
 
 typedef struct {
 	char path[64];
@@ -82,7 +124,7 @@ struct drsmp {
 	uint8_t return_path[64];
 };
 
-static void drsmp_get_init(void *umad, DRPath * path, int attr, int mod)
+static void drsmp_get_init(void *umad, DRPath * path, int attr, int mod, int mngt_method)
 {
 	struct drsmp *smp = (struct drsmp *)(umad_get_mad(umad));
 
@@ -108,7 +150,7 @@ static void drsmp_get_init(void *umad, DRPath * path, int attr, int mod)
 	smp->hop_cnt = (uint8_t) path->hop_cnt;
 }
 
-static void smp_get_init(void *umad, int lid, int attr, int mod)
+static void smp_get_init(void *umad, int lid, int attr, int mod, int mngt_method)
 {
 	struct drsmp *smp = (struct drsmp *)(umad_get_mad(umad));
 
@@ -154,34 +196,38 @@ static int str2DRPath(char *str, DRPath * path)
 	return path->hop_cnt;
 }
 
-static int dump_char, mgmt_class = IB_SMI_CLASS;
+static int dump_char;
 
 static int process_opt(void *context, int ch)
 {
+	struct mad_worker *w = (struct mad_worker *)context;
+
+	assert(w != 0);
+
 	switch (ch) {
 	case 's':
 		dump_char++;
 		break;
 	case 'D':
-		mgmt_class = IB_SMI_DIRECT_CLASS;
+		w->mgmt_class = IB_SMI_DIRECT_CLASS;
 		break;
 	case 'L':
-		mgmt_class = IB_SMI_CLASS;
+		w->mgmt_class = IB_SMI_CLASS;
 		break;
 	case 'm':
-		mngt_method = (uint64_t) strtoull(optarg, NULL, 0);
+		w->mngt_method = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
 	case 'N':
-		N = (uint64_t) strtoull(optarg, NULL, 0);
+		w->mad_queue_depth = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
 	case 't':
 		t_sec = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
 	case 'r':
-		ibd_retries = (uint64_t) strtoull(optarg, NULL, 0);
+		w->ibd_retries = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
 	case 'T':
-		ibd_timeout = (uint64_t) strtoull(optarg, NULL, 0);
+		w->ibd_timeout = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
 	default:
 		return -1;
@@ -200,13 +246,78 @@ struct smp_query_task {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
+
+int init_mad_worker(struct mad_worker *w)
+{
+	w->ibd_timeout = 200;
+	w->ibd_retries = 3;
+	w->mgmt_class = IB_SMI_CLASS;
+	w->mngt_method = 1; // Get
+	w->mad_queue_depth = 1;
+
+	w->recv_mad.smp = umad_get_mad(w->recv_mad.umad);
+	w->recv_mad.mad = (struct ib_user_mad*)w->recv_mad.umad;
+
+	w->ibd_ca[0] = 0;
+	w->ibd_ca_port = 0;
+	w->portid = -1;
+
+	w->total_mads = 0;
+	w->timeout_mads = 0;
+	w->send_mads = 0;
+	return 0;
+}
+
+int init_ib_device(struct mad_worker *w, const char *ibd_ca, int ibd_ca_port)
+{
+	strncpy(w->ibd_ca, ibd_ca,UMAD_CA_NAME_LEN -1);
+	w->ibd_ca_port = ibd_ca_port;
+	
+	if ( !( w->recv_mad.umad = umad_alloc(1, umad_size() + IB_MAD_SIZE)))
+		IBPANIC("can't alloc MAD");
+
+	if ((w->portid = umad_open_port(w->ibd_ca, w->ibd_ca_port)) < 0)
+		IBPANIC("can't open UMAD port (%s:%d)", ibd_ca, ibd_ca_port);
+
+	if ((w->mad_agent = umad_register(w->portid, w->mgmt_class, 1, 0, NULL)) < 0)
+		IBPANIC("Couldn't register agent for SMPs");
+}
+
+void finalize_mad_worker(struct mad_worker *w)
+{
+	umad_free(w->recv_mad.umad);
+
+	umad_unregister(w->portid, w->mad_agent);
+	umad_close_port(w->portid);
+
+}
+
+void report_worker_params(struct mad_worker *w, FILE *f)
+{
+	fprintf(f, "device: %s port %d\n", w->ibd_ca, w->ibd_ca_port);
+	fprintf(f, "umad timeout: %d  retries: %d\n ", w->ibd_timeout, w->ibd_retries);
+	fprintf(f, "mngt class %s (%d)\n ", w->mgmt_class ==  IB_SMI_CLASS? "IB_SMI_CLASS" : "IB_SMI_DIRECT_CLASS", w->mgmt_class);
+	fprintf(f, "mngt method %s (%d)\n ", w->mngt_method == 1 ? "GET" : "SET", w->mngt_method);
+	fprintf(f, "mad queue depth %d", w->mad_queue_depth);
+}
+
+void print_statistics(struct mad_worker *w, FILE *f)
+{
+	fprintf(f, "send mads: %d , timeouts: %d recieved mads: %d", w->send_mads, w->timeout_mads, w->total_mads);
+}
+
+void check_worker(const struct mad_worker *w)
+{
+	if (w->mngt_method != 1 && w->mngt_method != 2 )
+		IBPANIC("wrong mngt method : %d", w->mngt_method);
+	if (w->mgmt_class != IB_SMI_DIRECT_CLASS && w->mgmt_class != IB_SMI_CLASS)
+		IBPANIC("wrong mngt method : %d", w->mgmt_class);
+}
+
 int main(int argc, char *argv[])
 {
 	int dlid = 0;
-	void *umad;
-	struct drsmp *smp;
-	struct ib_user_mad *mad;
-	int i, j, portid, mod = 0, attr;
+	int i, j, mod = 0, attr;
 	DRPath path;
 	uint8_t *desc;
 	int length;
@@ -216,11 +327,10 @@ int main(int argc, char *argv[])
     uint64_t elapsedTime;
 	struct smp_query_task *smp_query_tasks;
 	int do_poll = 0;
-	uint64_t total_mads = 0;
-	uint64_t timeout_mads = 0;
 	uint64_t minTime = 0, maxTime = 0, totalTime = 0;
 	uint64_t totalSend = 0, totalRecv = 0;
 	double runTime = 0;
+	struct mad_worker w;
 
 
 	const struct ibdiag_opt opts[] = {
@@ -243,10 +353,12 @@ int main(int argc, char *argv[])
 		NULL
 	};
 
-	ibd_timeout = 10000;
+	init_mad_worker(&w);
 	
-	ibdiag_process_opts(argc, argv, NULL, "GKs", opts, process_opt,
+	ibdiag_process_opts(argc, argv, &w, "GKs", opts, process_opt,
 			    usage_args, usage_examples);
+	
+	check_worker(&w);
 
 	argc -= optind;
 	argv += optind;
@@ -254,45 +366,30 @@ int main(int argc, char *argv[])
 	if (argc < 2)
 		ibdiag_show_usage();
 
-	if (mgmt_class == IB_SMI_DIRECT_CLASS &&
+	if (w.mgmt_class == IB_SMI_DIRECT_CLASS &&
 	    str2DRPath(strdupa(argv[0]), &path) < 0)
 		IBPANIC("bad path str '%s'", argv[0]);
 
-	if (mgmt_class == IB_SMI_CLASS)
+	if (w.mgmt_class == IB_SMI_CLASS)
 		dlid = strtoul(argv[0], NULL, 0);
 
 	attr = strtoul(argv[1], NULL, 0);
 	if (argc > 2)
 		mod = strtoul(argv[2], NULL, 0);
 
-	if (mngt_method !=1 && mngt_method !=2)
-		IBPANIC("wrong umad method %d", mngt_method);	
-
-	printf("umad timeout %d retries %d\n", ibd_timeout, ibd_retries);
-	printf("umad method %d\n",mngt_method);
-	printf("umad queue %ld\n", N);
-	printf("running time in sec %d\n", t_sec);
-
 	if (umad_init() < 0)
 		IBPANIC("can't init UMAD library");
+	
+	init_ib_device(&w, ibd_ca, ibd_ca_port);
 
-	if ((portid = umad_open_port(ibd_ca, ibd_ca_port)) < 0)
-		IBPANIC("can't open UMAD port (%s:%d)", ibd_ca, ibd_ca_port);
+	report_worker_params(&w, stdout);
+	printf("running time in sec %d\n", t_sec);
 
-	if ((mad_agent = umad_register(portid, mgmt_class, 1, 0, NULL)) < 0)
-		IBPANIC("Couldn't register agent for SMPs");
-
-	if (!(umad = umad_alloc(1, umad_size() + IB_MAD_SIZE)))
-		IBPANIC("can't alloc MAD");
-
-	smp = umad_get_mad(umad);
-	mad = (struct ib_user_mad*)umad;
-
-	smp_query_tasks = (struct smp_query_task*)malloc(N * sizeof(smp_query_tasks[0]));
+	smp_query_tasks = (struct smp_query_task*)malloc(w.mad_queue_depth * sizeof(smp_query_tasks[0]));
 	if (!smp_query_tasks)
 		IBPANIC("can't alloc list of tasks");
-	memset(smp_query_tasks, 0, N * sizeof(smp_query_tasks[0]));
-	for (i = 0; i < N; ++i) {
+	memset(smp_query_tasks, 0, w.mad_queue_depth * sizeof(smp_query_tasks[0]));
+	for (i = 0; i < w.mad_queue_depth; ++i) {
 		smp_query_tasks[i].umad = umad_alloc(1, umad_size() + IB_MAD_SIZE);
 		if (!smp_query_tasks[i].umad)
 			IBPANIC("can't alloc MAD");
@@ -300,30 +397,30 @@ int main(int argc, char *argv[])
 		smp_query_tasks[i].smp = umad_get_mad(smp_query_tasks[i].umad);
 		smp_query_tasks[i].mad = (struct ib_user_mad *)smp_query_tasks[i].umad;
 
-		if (mgmt_class == IB_SMI_DIRECT_CLASS)
-			drsmp_get_init(smp_query_tasks[i].umad, &path, attr, mod);
+		if (w.mgmt_class == IB_SMI_DIRECT_CLASS)
+			drsmp_get_init(smp_query_tasks[i].umad, &path, attr, mod, w.mngt_method);
 		else
-			smp_get_init(smp_query_tasks[i].umad, dlid, attr, mod);
+			smp_get_init(smp_query_tasks[i].umad, dlid, attr, mod, w.mngt_method);
 		
 		memset(smp_query_tasks[i].smp->data,0xff,64);
 		smp_query_tasks[i].on_wire = 0;
 	}
 
-	if (ibdebug > 1)
-		xdump(stderr, "before send:\n", smp, 256);
+	//if (ibdebug > 1)
+	//	xdump(stderr, "before send:\n", w.smp, 256);
 
 	gettimeofday(&start, NULL);
 
 	length = IB_MAD_SIZE;
-	for (i = 0; i < N; ++i) {
+	for (i = 0; i < w.mad_queue_depth; ++i) {
 		int rc;
-		if (rc = umad_send(portid, mad_agent, smp_query_tasks[i].umad, length, ibd_timeout, -1) < 0) {
+		if (rc = umad_send(w.portid, w.mad_agent, smp_query_tasks[i].umad, length, w.ibd_timeout, -1) < 0) {
 			IBPANIC("send failed rc : %d", rc);
 			exit (-1);
 		}
 		gettimeofday(&smp_query_tasks[i].t1, NULL);
 		smp_query_tasks[i].on_wire = 1;
-		total_mads++;
+		w.total_mads++;
 		totalSend += length;
 	}
 
@@ -331,7 +428,7 @@ int main(int argc, char *argv[])
 		be64_t tid;
 		int status;
 
-		do_poll = umad_poll(portid, t_sec * 1000);
+		do_poll = umad_poll(w.portid, t_sec * 1000);
 
 		if (do_poll == -ETIMEDOUT)
 			break;
@@ -339,15 +436,15 @@ int main(int argc, char *argv[])
 			IBPANIC("poll failed");
 	
 		length = IB_MAD_SIZE;
-		if (umad_recv(portid, umad, &length, -1) != mad_agent) {
+		if (umad_recv(w.portid, w.recv_mad.umad, &length, -1) != w.mad_agent) {
 			IBPANIC("recv error: %s", strerror(errno));
 			exit (-1);
 		}
 
-		status = umad_status(umad);
+		status = umad_status(w.recv_mad.umad);
 		if (status == ETIMEDOUT) {
-			printf("timeout_ms %d retries %d \n", mad->timeout_ms, mad->retries);
-			timeout_mads++;
+			printf("timeout_ms %d retries %d \n", w.recv_mad.mad->timeout_ms, w.recv_mad.mad->retries);
+			w.timeout_mads++;
 			continue;
 		} else if (status) {
 			IBPANIC("umad error: %d %s", status, strerror(errno));
@@ -356,19 +453,19 @@ int main(int argc, char *argv[])
 		gettimeofday(&t2, NULL);
 		totalRecv += length;
 	
-		if (smp->status) {
+		if (w.recv_mad.smp->status) {
 			fprintf(stdout, "SMP status: 0x%x\n",
-				ntohs(smp->status));
+				ntohs(w.recv_mad.smp->status));
 		}
 
-		tid = smp->tid >> 32;
+		tid = w.recv_mad.smp->tid >> 32;
 
-		for (j = 0; j < N; ++j) {
+		for (j = 0; j < w.mad_queue_depth; ++j) {
 			be64_t t = smp_query_tasks[j].smp->tid >> 32;
 			if(t == tid)
 				break;
 		}
-		if(j < N) {
+		if(j < w.mad_queue_depth) {
 			int rc;
 
 			elapsedTime = (t2.tv_sec - smp_query_tasks[j].t1.tv_sec) * 1000000 + (t2.tv_usec - smp_query_tasks[j].t1.tv_usec);
@@ -378,18 +475,18 @@ int main(int argc, char *argv[])
 				maxTime = elapsedTime;
 			totalTime += elapsedTime;
 
-			if (mgmt_class == IB_SMI_DIRECT_CLASS)
-				drsmp_get_init(smp_query_tasks[j].umad, &path, attr, mod);
+			if (w.mgmt_class == IB_SMI_DIRECT_CLASS)
+				drsmp_get_init(smp_query_tasks[j].umad, &path, attr, mod, w.mngt_method);
 			else
-				smp_get_init(smp_query_tasks[j].umad, dlid, attr, mod);	
+				smp_get_init(smp_query_tasks[j].umad, dlid, attr, mod, w.mngt_method);	
 				
 			smp_query_tasks[j].on_wire = 0;
 
-			if (rc = umad_send(portid, mad_agent, smp_query_tasks[j].umad, length, ibd_timeout, ibd_retries) < 0) {
-				timeout_mads++;
+			if (rc = umad_send(w.portid, w.mad_agent, smp_query_tasks[j].umad, length, w.ibd_timeout, w.ibd_retries) < 0) {
+				w.timeout_mads++;
 				continue;
 			}
-			total_mads++;
+			w.total_mads++;
 			totalSend += length;
 			gettimeofday(&smp_query_tasks[j].t1, NULL);
 			smp_query_tasks[j].on_wire = 1;
@@ -403,37 +500,37 @@ int main(int argc, char *argv[])
 			do_poll = 1;
 	}
 	
-	printf("# of MADs %ld , # of timeouts %ld\n", total_mads, timeout_mads);
-	printf("Min latency %ld us , Max latency %ld us, Average latency %d us\n", minTime, maxTime, (int)(totalTime / total_mads));
+	print_statistics(&w, stdout);
+	printf("Min latency %ld us , Max latency %ld us, Average latency %d us\n", minTime, maxTime, (int)(totalTime / w.total_mads));
     printf("Sent bytes %ld , Recv bytes %ld\n", totalSend, totalRecv);
-	printf("Send BW [MB/s] %.1d\n", (double)totalSend/1024/1024/runTime);
-	printf("Send MADS/s %.1f\n", (float)total_mads / runTime);
+	printf("Send BW [MB/s] %.1f\n", (double)totalSend/1024/1024/runTime);
+	printf("Send MADS/s %.1f\n", (float)w.total_mads / runTime);
 	//printf("Recv BW [MB/s] %d", 1000000*totalRecv/1024/1024/totalTime);
 
 	if (ibdebug)
 		fprintf(stderr, "%d bytes received\n", length);
 
 	if (!dump_char) {
-		xdump(stdout, NULL, smp->data, 64);
-		if (smp->status)
+		xdump(stdout, NULL, w.recv_mad.smp->data, 64);
+		if (w.recv_mad.smp->status)
 			fprintf(stdout, "SMP status: 0x%x\n",
-				ntohs(smp->status));
+				ntohs(w.recv_mad.smp->status));
 		goto exit;
 	}
 
-	desc = smp->data;
+	desc = w.recv_mad.smp->data;
 	for (i = 0; i < 64; ++i) {
 		if (!desc[i])
 			break;
 		putchar(desc[i]);
 	}
 	putchar('\n');
-	if (smp->status)
-		fprintf(stdout, "SMP status: 0x%x\n", ntohs(smp->status));
+	if (w.recv_mad.smp->status)
+		fprintf(stdout, "SMP status: 0x%x\n", ntohs(w.recv_mad.smp->status));
 
 exit:
-	umad_free(umad);
-	for (i = 0; i < N; ++i)
+	finalize_mad_worker(&w);
+	for (i = 0; i < w.mad_queue_depth; ++i)
 		umad_free(smp_query_tasks[i].umad);
 	free(smp_query_tasks);
 	return 0;
