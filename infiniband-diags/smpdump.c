@@ -121,7 +121,8 @@ struct mad_worker {
 	*/
 	int target_queue_depth;
 	int source_queue_depth;
-	struct mad_buffer mad;
+	void *umad;
+	//struct mad_buffer mad;
 	int last_device;
 	int timeout_ms;
 	struct timeval start;
@@ -314,12 +315,12 @@ int init_ib_device(struct mad_worker *w, const char *ca, int ca_port)
 	strncpy(w->ibd_ca, ibd_ca,UMAD_CA_NAME_LEN -1);
 	w->ibd_ca_port = ibd_ca_port;
 	
-	if ( !( w->mad.umad = umad_alloc(1, umad_size() + IB_MAD_SIZE)))
+	if ( !( w->umad = umad_alloc(1, umad_size() + IB_MAD_SIZE)))
 		IBPANIC("can't alloc MAD");
 	
-	w->mad.smp = umad_get_mad(w->mad.umad);
-	w->mad.mad = (struct ib_user_mad*)w->mad.umad;
-	memset(w->mad.smp->data,0xff,64);
+//	w->mad.smp = (struct drsmp *) umad_get_mad(w->mad.umad);
+//	w->mad.mad = (struct ib_user_mad*)w->mad.umad;
+//	memset(w->mad.smp->data,0xff,64);
 
 	if ((w->portid = umad_open_port(w->ibd_ca, w->ibd_ca_port)) < 0)
 		IBPANIC("can't open UMAD port (%s:%d)", ibd_ca, ibd_ca_port);
@@ -353,6 +354,7 @@ int send_mads(struct mad_worker *w)
 	int i, j, rc;
 	struct mad_target *target;
 	int idx;
+	struct drsmp *smp = (struct drsmp *)(umad_get_mad(w->umad));
 
 	for (i = 0; i < w->source_queue_depth; ++i) {
 		if (!w->mads_on_wire[i].tid) {
@@ -368,16 +370,16 @@ int send_mads(struct mad_worker *w)
 				continue;
 
 			if (w->mgmt_class == IB_SMI_DIRECT_CLASS)
-				drsmp_get_init(w->mad.umad, w->targets[idx].path, w->smp_attr, w->smp_mod, w->mngt_method); // TODO: Fix
+				drsmp_get_init(w->umad, w->targets[idx].path, w->smp_attr, w->smp_mod, w->mngt_method); // TODO: Fix
 			else
-				smp_get_init(w->mad.umad, w->targets[idx].lid, w->smp_attr, w->smp_mod, w->mngt_method);
+				smp_get_init(w->umad, w->targets[idx].lid, w->smp_attr, w->smp_mod, w->mngt_method);
 
-			rc = umad_send(w->portid, w->mad_agent, w->mad.umad, IB_MAD_SIZE, w->ibd_timeout, w->ibd_retries);
+			rc = umad_send(w->portid, w->mad_agent, w->umad, IB_MAD_SIZE, w->ibd_timeout, w->ibd_retries);
 			if (rc)
 				IBPANIC("send failed rc : %d", rc);	
 			
 			gettimeofday(&w->mads_on_wire[i].start, NULL);
-			w->mads_on_wire[i].tid = w->mad.smp->tid;
+			w->mads_on_wire[i].tid = smp->tid;
 			w->mads_on_wire[i].target = target;
 			w->last_device = idx;
 			target->on_wire_mads++;
@@ -405,6 +407,7 @@ int process_mads(struct mad_worker *w)
 	be64_t tid;
 	int latency;
 	struct mad_target *target;
+	struct drsmp *smp = (struct drsmp *)(umad_get_mad(w->umad));
 
 	gettimeofday(&w->start, NULL);
 
@@ -424,14 +427,15 @@ int process_mads(struct mad_worker *w)
 			IBPANIC("umad_poll failed: %d %m", rc);
 
 		length = IB_MAD_SIZE;
-		rc = umad_recv(w->portid, w->mad.umad, &length, -1);
+		rc = umad_recv(w->portid, w->umad, &length, -1);
 		if (rc != w->mad_agent) {
 			IBPANIC("recv error: %d %m", rc);
 		}
 
 		gettimeofday(&current, NULL);
-		status = umad_status(w->mad.umad);
-		tid = w->mad.smp->tid >> 32;
+		status = umad_status(w->umad);
+		
+		tid = smp->tid >> 32;
 
 		for (i = 0; i < w->source_queue_depth; ++i) {
 			be64_t t = w->mads_on_wire[i].tid >> 32;
@@ -469,7 +473,7 @@ int process_mads(struct mad_worker *w)
 
 void finalize_mad_worker(struct mad_worker *w)
 {
-	umad_free(w->mad.umad);
+	umad_free(w->umad);
 
 	umad_unregister(w->portid, w->mad_agent);
 	umad_close_port(w->portid);
@@ -491,7 +495,7 @@ void print_statistics(struct mad_worker *w, FILE *f)
 {
 	int i;
 	int send_mads = 0, ok_mads = 0, errors = 0, timeouts = 0 , total_mads = 0;
-	int total_time;
+	int total_time = 0;
 	int min_latency_us = 0, max_latency_us = 0, avrg_latency_us = 0;
 
 	for (i = 0; i < w->n_targets; ++ i) {
@@ -502,7 +506,7 @@ void print_statistics(struct mad_worker *w, FILE *f)
 
 		if (!min_latency_us || min_latency_us > w->targets[i].min_latency_us)
 			min_latency_us = w->targets[i].min_latency_us;
-		if (max_latency_us > w->targets[i].max_latency_us)
+		if (max_latency_us < w->targets[i].max_latency_us)
 			max_latency_us = w->targets[i].max_latency_us;
 		
 		total_time += w->targets[i].total_time_us;
@@ -544,7 +548,6 @@ int main(int argc, char *argv[])
 	int i;
 	DRPath path;
 	uint8_t *desc;
-	int length;
 	struct mad_worker w;
 
 	const struct ibdiag_opt opts[] = {
@@ -606,10 +609,7 @@ int main(int argc, char *argv[])
 	process_mads(&w);
 	
 	print_statistics(&w, stdout);
-
-	if (ibdebug)
-		fprintf(stderr, "%d bytes received\n", length);
-
+/*
 	if (!dump_char) {
 		xdump(stdout, NULL, w.mad.smp->data, 64);
 		if (w.mad.smp->status)
@@ -617,7 +617,8 @@ int main(int argc, char *argv[])
 				ntohs(w.mad.smp->status));
 		goto exit;
 	}
-
+*/
+/*
 	desc = w.mad.smp->data;
 	for (i = 0; i < 64; ++i) {
 
@@ -625,9 +626,10 @@ int main(int argc, char *argv[])
 			break;
 		putchar(desc[i]);
 	}
+*/
 	putchar('\n');
-	if (w.mad.smp->status)
-		fprintf(stdout, "SMP status: 0x%x\n", ntohs(w.mad.smp->status));
+//	if (w.mad.smp->status)
+//		fprintf(stdout, "SMP status: 0x%x\n", ntohs(w.mad.smp->status));
 
 exit:
 	finalize_mad_worker(&w);
