@@ -360,7 +360,7 @@ int send_mads(struct mad_worker *w)
 		if (!w->mads_on_wire[i].tid) {
 
 			for(j = 0; j < w->n_targets; ++j) {
-				idx = (w->last_device + j) % w->n_targets;
+				idx = (w->last_device + 1 +j) % w->n_targets;
 				target = &w->targets[idx];
 				if (target->on_wire_mads < w->target_queue_depth)
 					break;
@@ -499,6 +499,10 @@ void print_statistics(struct mad_worker *w, FILE *f)
 	int min_latency_us = 0, max_latency_us = 0, avrg_latency_us = 0;
 
 	for (i = 0; i < w->n_targets; ++ i) {
+
+		if (!w->targets[i].send_mads)
+			continue;
+			
 		send_mads += w->targets[i].send_mads;
 		ok_mads += w->targets[i].ok_mads;
 		errors += w->targets[i].errors;
@@ -548,6 +552,7 @@ int main(int argc, char *argv[])
 	DRPath path;
 //	uint8_t *desc;
 	struct mad_worker w;
+	uint32_t lids[1024] = {};
 
 	const struct ibdiag_opt opts[] = {
 		{"string", 's', 0, NULL, ""},
@@ -600,7 +605,8 @@ int main(int argc, char *argv[])
 
 	report_worker_params(&w, stdout);
 
-	set_lid_routet_targets(&w, (uint32_t *)&dlid, 1);
+	lids[0] = lids[1] = dlid;
+	set_lid_routet_targets(&w, (uint32_t *)&lids, 2);
 
 	//if (ibdebug > 1)
 	//	xdump(stderr, "before send:\n", w.smp, 256);
