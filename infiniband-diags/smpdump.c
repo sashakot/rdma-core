@@ -547,7 +547,7 @@ void print_statistics(struct mad_worker *w, FILE *f)
 {
 	int i;
 	int send_mads = 0, ok_mads = 0, errors = 0, timeouts = 0 , total_mads = 0;
-	int total_time = 0;
+	uint64_t total_time = 0;
 	int min_latency_us = 0, max_latency_us = 0, avrg_latency_us = 0;
 
 	for (i = 0; i < w->n_targets; ++ i) {
@@ -569,17 +569,21 @@ void print_statistics(struct mad_worker *w, FILE *f)
 	}
 
 	total_mads = ok_mads + errors + timeouts;
-	avrg_latency_us = total_time / total_mads;
+	if (total_mads > 0 )
+		avrg_latency_us = total_time / total_mads;
 
 	fprintf(f, "Local device: %s , port: %d\n", strlen(w->ibd_ca) ? w->ibd_ca : "Default", w->ibd_ca_port);
 	fprintf(f, "	send mads: %d , ok mads: %d , timeouts: %d , errors %d\n",  send_mads, ok_mads, timeouts, errors);
 	fprintf(f, "	latency (us) min: %d , max:%d , average: %d\n",  min_latency_us, max_latency_us, avrg_latency_us);
+	fprintf(f, "	mas/s: %ld\n", total_mads / (total_time / 1000000) );
 	fprintf(f, "\n");
 
 	for (i = 0; i < w->n_targets; ++ i) {
+		total_mads = w->targets[i].ok_mads + w->targets[i].timeouts + w->targets[i].errors;
 		fprintf(f, "lid: %d", w->targets[i].lid);
 		fprintf(f, "	send mads: %d , ok mads: %d , timeouts: %d , errors %d\n",  w->targets[i].send_mads, w->targets[i].ok_mads, w->targets[i].timeouts, w->targets[i].errors);
 		fprintf(f, "	latency (us) min: %d , max:%d , average: %d\n",  w->targets[i].min_latency_us, w->targets[i].max_latency_us, w->targets[i].avrg_latency_us);
+		fprintf(f, "	mas/s: %ld\n",  total_mads / (w->targets[i].total_time_us / 1000000));
 		fprintf(f, "\n");
 	}
 }
