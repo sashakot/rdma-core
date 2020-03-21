@@ -200,7 +200,7 @@ static void smp_get_init(void *umad, int lid, int attr, int mod, int mngt_method
 {
 	struct drsmp *smp = (struct drsmp *)(umad_get_mad(umad));
 
-	memset(smp, 0, sizeof(*smp));
+	memset(smp, 0, sizeof(*smp)-8);
 
 	smp->base_version = 1;
 	smp->mgmt_class = IB_SMI_CLASS;
@@ -312,26 +312,26 @@ int init_mad_worker(struct mad_worker *w)
 
 int init_ib_device(struct mad_worker *w, const char *ca, int ca_port)
 {
-	strncpy(w->ibd_ca, ibd_ca,UMAD_CA_NAME_LEN -1);
+	if (ca)
+		strncpy(w->ibd_ca, ibd_ca,UMAD_CA_NAME_LEN -1);
 	w->ibd_ca_port = ibd_ca_port;
-	
-	if ( !( w->umad = umad_alloc(1, umad_size() + IB_MAD_SIZE)))
-		IBPANIC("can't alloc MAD");
-	
-//	w->mad.smp = (struct drsmp *) umad_get_mad(w->mad.umad);
-//	w->mad.mad = (struct ib_user_mad*)w->mad.umad;
-//	memset(w->mad.smp->data,0xff,64);
 
-	if ((w->portid = umad_open_port(w->ibd_ca, w->ibd_ca_port)) < 0)
+	if ((w->portid = umad_open_port(ibd_ca, ibd_ca_port)) < 0)
 		IBPANIC("can't open UMAD port (%s:%d)", ibd_ca, ibd_ca_port);
 
 	if ((w->mad_agent = umad_register(w->portid, w->mgmt_class, 1, 0, NULL)) < 0)
 		IBPANIC("Couldn't register agent for SMPs");
 
+	if ( !( w->umad = umad_alloc(1, umad_size() + IB_MAD_SIZE)))
+		IBPANIC("can't alloc MAD");
+
+	//	w->mad.smp = (struct drsmp *) umad_get_mad(w->mad.umad);
+//	w->mad.mad = (struct ib_user_mad*)w->mad.umad;
+//	memset(w->mad.smp->data,0xff,64);
+
 	w->mads_on_wire = (struct mad_operation *)calloc(1, w->source_queue_depth * sizeof(w->mads_on_wire[0]));
 	if (!w->mads_on_wire)
 		IBPANIC("Can't allocate mad queue");
-	
 	return 0;
 }
 
@@ -376,7 +376,7 @@ int send_mads(struct mad_worker *w)
 
 			rc = umad_send(w->portid, w->mad_agent, w->umad, IB_MAD_SIZE, w->ibd_timeout, w->ibd_retries);
 			if (rc)
-				IBPANIC("send failed rc : %d", rc);	
+				IBPANIC("send failed rc : %d", rc);
 			
 			gettimeofday(&w->mads_on_wire[i].start, NULL);
 			w->mads_on_wire[i].tid = smp->tid;
@@ -488,7 +488,7 @@ void report_worker_params(struct mad_worker *w, FILE *f)
 	fprintf(f, "umad timeout: %d  retries: %d\n ", w->ibd_timeout, w->ibd_retries);
 	fprintf(f, "mngt class %s (%d)\n ", w->mgmt_class ==  IB_SMI_CLASS? "IB_SMI_CLASS" : "IB_SMI_DIRECT_CLASS", w->mgmt_class);
 	fprintf(f, "mngt method %s (%d)\n ", w->mngt_method == 1 ? "GET" : "SET", w->mngt_method);
-	fprintf(f, "source queue depth: %d , target queue depth: %d", w->source_queue_depth, w->target_queue_depth);
+	fprintf(f, "source queue depth: %d , target queue depth: %d\n", w->source_queue_depth, w->target_queue_depth);
 }
 
 void print_statistics(struct mad_worker *w, FILE *f)
@@ -515,13 +515,13 @@ void print_statistics(struct mad_worker *w, FILE *f)
 	total_mads = ok_mads + errors + timeouts;
 	avrg_latency_us = total_time / total_mads;
 
-	fprintf(f, "Local device %s port %d", w->ibd_ca, w->ibd_ca_port);
+	fprintf(f, "Local device: %s , port: %d\n", strlen(w->ibd_ca) ? w->ibd_ca : "Default", w->ibd_ca_port);
 	fprintf(f, "	send mads: %d , ok mads: %d , timeouts: %d , errors %d\n",  send_mads, ok_mads, timeouts, errors);
 	fprintf(f, "	latency (us) min: %d , max:%d , average: %d\n",  min_latency_us, max_latency_us, avrg_latency_us);
 	fprintf(f, "\n");
 
 	for (i = 0; i < w->n_targets; ++ i) {
-		fprintf(f, "lid %d", w->targets[i].lid);
+		fprintf(f, "lid: %d", w->targets[i].lid);
 		fprintf(f, "	send mads: %d , ok mads: %d , timeouts: %d , errors %d\n",  w->targets[i].send_mads, w->targets[i].ok_mads, w->targets[i].timeouts, w->targets[i].errors);
 		fprintf(f, "	latency (us) min: %d , max:%d , average: %d\n",  w->targets[i].min_latency_us, w->targets[i].max_latency_us, w->targets[i].avrg_latency_us);
 		fprintf(f, "\n");
@@ -545,9 +545,8 @@ void check_worker(const struct mad_worker *w)
 int main(int argc, char *argv[])
 {
 	int dlid = 0;
-	int i;
 	DRPath path;
-	uint8_t *desc;
+//	uint8_t *desc;
 	struct mad_worker w;
 
 	const struct ibdiag_opt opts[] = {
@@ -631,7 +630,6 @@ int main(int argc, char *argv[])
 //	if (w.mad.smp->status)
 //		fprintf(stdout, "SMP status: 0x%x\n", ntohs(w.mad.smp->status));
 
-exit:
 	finalize_mad_worker(&w);
 	return 0;
 }
