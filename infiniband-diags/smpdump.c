@@ -65,10 +65,10 @@ typedef struct {
 struct mad_target {
 	uint32_t lid;
 	DRPath * path;
-	int on_wire_mads; 
+	int on_wire_mads;
 	int send_mads;
 	int timeouts;	// number of timeout responces from driver
-	int errors;		
+	int errors;
 	int ok_mads;	// number of ok responces from device
 	int min_latency_us;
 	int max_latency_us;
@@ -102,7 +102,7 @@ struct mad_worker {
 	int mngt_method; // 1 - Get, 2 - Set
 	int smp_attr;
 	int smp_mod;
-	
+
 	/*
 	IB Device
 	*/
@@ -296,7 +296,7 @@ int init_mad_worker(struct mad_worker *w)
 	w->smp_mod = 0;
 	w->source_queue_depth = w->target_queue_depth = 1;
 
-	
+
 	w->last_device = 0;
 
 	w->targets = NULL;
@@ -377,7 +377,7 @@ int send_mads(struct mad_worker *w)
 			rc = umad_send(w->portid, w->mad_agent, w->umad, IB_MAD_SIZE, w->ibd_timeout, w->ibd_retries);
 			if (rc)
 				IBPANIC("send failed rc : %d", rc);
-			
+
 			gettimeofday(&w->mads_on_wire[i].start, NULL);
 			w->mads_on_wire[i].tid = smp->tid;
 			w->mads_on_wire[i].target = target;
@@ -396,7 +396,7 @@ inline float timedifference_msec(struct timeval t0, struct timeval t1)
 
 inline int timedifference_usec(struct timeval t0, struct timeval t1)
 {
-	return timedifference_msec(t0, t1) * 1000; 
+	return timedifference_msec(t0, t1) * 1000;
 }
 
 int process_mads(struct mad_worker *w)
@@ -434,7 +434,7 @@ int process_mads(struct mad_worker *w)
 
 		gettimeofday(&current, NULL);
 		status = umad_status(w->umad);
-		
+
 		tid = smp->tid >> 32;
 
 		for (i = 0; i < w->source_queue_depth; ++i) {
@@ -508,7 +508,7 @@ void print_statistics(struct mad_worker *w, FILE *f)
 			min_latency_us = w->targets[i].min_latency_us;
 		if (max_latency_us < w->targets[i].max_latency_us)
 			max_latency_us = w->targets[i].max_latency_us;
-		
+
 		total_time += w->targets[i].total_time_us;
 	}
 
@@ -570,10 +570,10 @@ int main(int argc, char *argv[])
 	};
 
 	init_mad_worker(&w);
-	
+
 	ibdiag_process_opts(argc, argv, &w, "GKs", opts, process_opt,
 			    usage_args, usage_examples);
-	
+
 	check_worker(&w);
 
 	argc -= optind;
@@ -595,18 +595,18 @@ int main(int argc, char *argv[])
 
 	if (umad_init() < 0)
 		IBPANIC("can't init UMAD library");
-	
+
 	init_ib_device(&w, ibd_ca, ibd_ca_port);
 
 	report_worker_params(&w, stdout);
 
 	set_lid_routet_targets(&w, (uint32_t *)&dlid, 1);
-	
+
 	//if (ibdebug > 1)
 	//	xdump(stderr, "before send:\n", w.smp, 256);
-	
+
 	process_mads(&w);
-	
+
 	print_statistics(&w, stdout);
 /*
 	if (!dump_char) {
