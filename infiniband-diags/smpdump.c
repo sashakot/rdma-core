@@ -46,8 +46,8 @@
 
 #include <sys/time.h>
 
-
 #include <ibdiag_common.h>
+#include <infiniband/ibnetdisc.h>
 
 #define MAX_TARGET_QUEUE_DEPTH 128
 #define MAX_SOURCE_QUEUE_DEPTH 1024
@@ -241,6 +241,24 @@ static int str2DRPath(char *str, DRPath * path)
 	return path->hop_cnt;
 }
 
+static int parseLIDs(char *str, uint32_t *lids, int n)
+{
+	char *s;
+	int i = -1;
+
+	while (str && *str && i < n) {
+		if ((s = strchr(str, ',')))
+			*s = 0;
+		lids[i] = strtoul(str, NULL, 0);
+		if (!s)
+			break;
+		str = s + 1;
+		i++;
+	}
+
+	return i + 1;
+}
+
 static int dump_char;
 
 static int process_opt(void *context, int ch)
@@ -294,7 +312,6 @@ int init_mad_worker(struct mad_worker *w)
 	w->smp_attr = 0;
 	w->smp_mod = 0;
 	w->source_queue_depth = w->target_queue_depth = 1;
-
 
 	w->last_device = 0;
 
@@ -584,11 +601,11 @@ void check_worker(const struct mad_worker *w)
 
 int main(int argc, char *argv[])
 {
-	int dlid = 0;
 	DRPath path;
 //	uint8_t *desc;
 	struct mad_worker w;
 	uint32_t lids[1024] = {};
+	int n_lids = 0;
 
 	const struct ibdiag_opt opts[] = {
 		{"string", 's', 0, NULL, ""},
@@ -627,8 +644,11 @@ int main(int argc, char *argv[])
 	    str2DRPath(strdupa(argv[0]), &path) < 0)
 		IBPANIC("bad path str '%s'", argv[0]);
 
-	if (w.mgmt_class == IB_SMI_CLASS)
-		dlid = strtoul(argv[0], NULL, 0);
+	if (w.mgmt_class == IB_SMI_CLASS) {
+		n_lids = parseLIDs(strdupa(argv[0]),lids, 1024);
+		if (n_lids <= 0)
+			IBPANIC("bad lids list str '%s'", argv[0]);
+	}
 
 	w.smp_attr = strtoul(argv[1], NULL, 0);
 	if (argc > 2)
@@ -641,8 +661,7 @@ int main(int argc, char *argv[])
 
 	report_worker_params(&w, stdout);
 
-	lids[0] = lids[1] = dlid;
-	set_lid_routet_targets(&w, (uint32_t *)&lids, 2);
+	set_lid_routet_targets(&w, (uint32_t *)&lids, n_lids);
 
 	//if (ibdebug > 1)
 	//	xdump(stderr, "before send:\n", w.smp, 256);
