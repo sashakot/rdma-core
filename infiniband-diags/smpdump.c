@@ -132,7 +132,7 @@ struct mad_worker {
 	int last_device;
 	int timeout_ms;
 	struct timeval start;
-	
+
 	/*
 	queue
 	*/
@@ -249,11 +249,10 @@ static int parseLIDs(char *str, uint32_t *lids, int n)
 	while (str && *str && i < n) {
 		if ((s = strchr(str, ',')))
 			*s = 0;
-		lids[i] = strtoul(str, NULL, 0);
+		lids[++i] = strtoul(str, NULL, 0);
 		if (!s)
 			break;
 		str = s + 1;
-		i++;
 	}
 
 	return i + 1;
