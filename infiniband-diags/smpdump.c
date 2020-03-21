@@ -52,6 +52,11 @@
 #define MAX_TARGET_QUEUE_DEPTH 128
 #define MAX_SOURCE_QUEUE_DEPTH 1024
 
+enum mngt_methods {
+	mngt_method_get = 1,
+	mngt_method_set = 2
+};
+
 float timedifference_msec(struct timeval t0, struct timeval t1);
 int timedifference_usec(struct timeval t0, struct timeval t1);
 
@@ -74,6 +79,7 @@ struct mad_target {
 	int max_latency_us;
 	int avrg_latency_us;
 	uint64_t total_time_us; // total time of all mads on wire
+	uint8_t data[64]; // data for set operation
 };
 
 struct mad_operation {
@@ -126,13 +132,7 @@ struct mad_worker {
 	int last_device;
 	int timeout_ms;
 	struct timeval start;
-	/*
-	statistics
-	*/
-//	uint64_t total_mads;
-//	uint64_t timeout_mads;
-//	uint64_t send_mads;
-
+	
 	/*
 	queue
 	*/
@@ -148,6 +148,7 @@ void set_lid_routet_targets(struct mad_worker *w, uint32_t *lids, int n);
 int send_mads(struct mad_worker *w);
 void report_worker_params(struct mad_worker *w, FILE *f);
 void print_statistics(struct mad_worker *w, FILE *f);
+int fetch_attribute(struct mad_worker *w);
 
 struct drsmp {
 	uint8_t base_version;
@@ -170,7 +171,7 @@ struct drsmp {
 	uint8_t return_path[64];
 };
 
-static void drsmp_get_init(void *umad, DRPath * path, int attr, int mod, int mngt_method)
+static void drsmp_get_init(void *umad, DRPath * path, int attr, int mod, int mngt_method, uint8_t data[64])
 {
 	struct drsmp *smp = (struct drsmp *)(umad_get_mad(umad));
 
@@ -194,9 +195,12 @@ static void drsmp_get_init(void *umad, DRPath * path, int attr, int mod, int mng
 		memcpy(smp->initial_path, path->path, path->hop_cnt + 1);
 
 	smp->hop_cnt = (uint8_t) path->hop_cnt;
+
+	if (mngt_method == mngt_method_set && data)
+		memcpy(smp->data, data, 64);
 }
 
-static void smp_get_init(void *umad, int lid, int attr, int mod, int mngt_method)
+static void smp_get_init(void *umad, int lid, int attr, int mod, int mngt_method, uint8_t data[64])
 {
 	struct drsmp *smp = (struct drsmp *)(umad_get_mad(umad));
 
@@ -211,6 +215,9 @@ static void smp_get_init(void *umad, int lid, int attr, int mod, int mngt_method
 	smp->attr_mod = htonl(mod);
 	smp->tid = htobe64(drmad_tid);
 	drmad_tid++;
+
+	if (mngt_method == mngt_method_set && data)
+		memcpy(smp->data, data, 64);
 
 	umad_set_addr(umad, lid, 0, 0, 0);
 }
@@ -230,14 +237,6 @@ static int str2DRPath(char *str, DRPath * path)
 			break;
 		str = s + 1;
 	}
-
-#if 0
-	if (path->path[0] != 0 ||
-	    (path->hop_cnt > 0 && dev_port && path->path[1] != dev_port)) {
-		DEBUG("hop 0 != 0 or hop 1 != dev_port");
-		return -1;
-	}
-#endif
 
 	return path->hop_cnt;
 }
@@ -325,10 +324,6 @@ int init_ib_device(struct mad_worker *w, const char *ca, int ca_port)
 	if ( !( w->umad = umad_alloc(1, umad_size() + IB_MAD_SIZE)))
 		IBPANIC("can't alloc MAD");
 
-	//	w->mad.smp = (struct drsmp *) umad_get_mad(w->mad.umad);
-//	w->mad.mad = (struct ib_user_mad*)w->mad.umad;
-//	memset(w->mad.smp->data,0xff,64);
-
 	w->mads_on_wire = (struct mad_operation *)calloc(1, w->source_queue_depth * sizeof(w->mads_on_wire[0]));
 	if (!w->mads_on_wire)
 		IBPANIC("Can't allocate mad queue");
@@ -347,6 +342,41 @@ void set_lid_routet_targets(struct mad_worker *w, uint32_t *lids, int n)
 
 	for (i = 0; i < n; ++i)
 		w->targets[i].lid = lids[i];
+}
+
+int fetch_attribute(struct mad_worker *w)
+{
+	int i, rc, length, status;
+	struct drsmp *smp;
+
+	if(w->mngt_method != mngt_method_set)
+		return -1;
+
+	for (i = 0; i < w->n_targets; i++) {
+		if (w->mgmt_class == IB_SMI_DIRECT_CLASS)
+				drsmp_get_init(w->umad, w->targets[i].path, w->smp_attr, w->smp_mod, mngt_method_get, NULL); // TODO: Fix
+			else
+				smp_get_init(w->umad, w->targets[i].lid, w->smp_attr, w->smp_mod, mngt_method_get, NULL); // Get attribute
+
+			rc = umad_send(w->portid, w->mad_agent, w->umad, IB_MAD_SIZE, 1000, 3); // hardcoded timeout and retries. This send is only preprocessing
+			if (rc)
+				IBPANIC("send failed rc : %d", rc);
+
+			length = IB_MAD_SIZE;
+			rc = umad_recv(w->portid, w->umad, &length, -1);
+			if (rc != w->mad_agent)
+				IBPANIC("recv error: %d %m", rc);
+
+			status = umad_status(w->umad);
+			if (status == ETIMEDOUT)
+				IBPANIC("mad timeout");
+
+			smp = (struct drsmp *)(umad_get_mad(w->umad));
+
+			memcpy(w->targets[i].data, smp->data, 64);
+	}
+
+	return 0;
 }
 
 int send_mads(struct mad_worker *w)
@@ -370,9 +400,9 @@ int send_mads(struct mad_worker *w)
 				continue;
 
 			if (w->mgmt_class == IB_SMI_DIRECT_CLASS)
-				drsmp_get_init(w->umad, w->targets[idx].path, w->smp_attr, w->smp_mod, w->mngt_method); // TODO: Fix
+				drsmp_get_init(w->umad, w->targets[idx].path, w->smp_attr, w->smp_mod, w->mngt_method, w->targets[idx].data); // TODO: Fix
 			else
-				smp_get_init(w->umad, w->targets[idx].lid, w->smp_attr, w->smp_mod, w->mngt_method);
+				smp_get_init(w->umad, w->targets[idx].lid, w->smp_attr, w->smp_mod, w->mngt_method, w->targets[idx].data);
 
 			rc = umad_send(w->portid, w->mad_agent, w->umad, IB_MAD_SIZE, w->ibd_timeout, w->ibd_retries);
 			if (rc)
@@ -408,6 +438,12 @@ int process_mads(struct mad_worker *w)
 	int latency;
 	struct mad_target *target;
 	struct drsmp *smp = (struct drsmp *)(umad_get_mad(w->umad));
+
+	if(w->mngt_method == mngt_method_set) {
+		rc = fetch_attribute(w);
+		if (rc)
+			IBPANIC("fetch attribute value is failed");
+	}
 
 	gettimeofday(&w->start, NULL);
 
