@@ -59,6 +59,8 @@ enum mngt_methods {
 
 float timedifference_msec(struct timeval t0, struct timeval t1);
 int timedifference_usec(struct timeval t0, struct timeval t1);
+float timedifference_sec(struct timeval t0, struct timeval t1);
+const char *get_attribute_name(int attr);
 
 static int drmad_tid = 0x123;
 
@@ -132,6 +134,7 @@ struct mad_worker {
 	int last_device;
 	int timeout_ms;
 	struct timeval start;
+	struct timeval end;
 
 	/*
 	queue
@@ -280,7 +283,10 @@ static int process_opt(void *context, int ch)
 		w->mngt_method = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
 	case 'N':
-		w->source_queue_depth = w->target_queue_depth = (uint64_t) strtoull(optarg, NULL, 0);
+		w->source_queue_depth = (uint64_t) strtoull(optarg, NULL, 0);
+		break;
+	case 'n':
+		w->target_queue_depth = (uint64_t) strtoull(optarg, NULL, 0);
 		break;
 	case 't':
 		w->timeout_ms = (uint64_t) strtoull(optarg, NULL, 0);
@@ -445,6 +451,12 @@ inline int timedifference_usec(struct timeval t0, struct timeval t1)
 	return timedifference_msec(t0, t1) * 1000;
 }
 
+inline float timedifference_sec(struct timeval t0, struct timeval t1)
+{
+	return timedifference_msec(t0, t1) / 1000;
+}
+
+
 int process_mads(struct mad_worker *w)
 {
 	float time_left_ms;
@@ -468,13 +480,13 @@ int process_mads(struct mad_worker *w)
 
 		time_left_ms = w->timeout_ms - timedifference_msec(w->start, current);
 		if (time_left_ms <= 0)
-			return 0;
+			goto exit;
 
 		send_mads(w);
 
 		rc = umad_poll(w->portid, (int)time_left_ms);
 		if (rc == -ETIMEDOUT)
-			return 0;
+			goto exit;
 		else if (rc)
 			IBPANIC("umad_poll failed: %d %m", rc);
 
@@ -521,6 +533,9 @@ int process_mads(struct mad_worker *w)
 			IBWARN("tid %ld is not found", be64toh(tid));
 		}
 	}
+exit:
+	gettimeofday(&w->end, NULL);
+	return 0;
 }
 
 void finalize_mad_worker(struct mad_worker *w)
@@ -540,6 +555,7 @@ void report_worker_params(struct mad_worker *w, FILE *f)
 	fprintf(f, "umad timeout: %d  retries: %d\n ", w->ibd_timeout, w->ibd_retries);
 	fprintf(f, "mngt class %s (%d)\n ", w->mgmt_class ==  IB_SMI_CLASS? "IB_SMI_CLASS" : "IB_SMI_DIRECT_CLASS", w->mgmt_class);
 	fprintf(f, "mngt method %s (%d)\n ", w->mngt_method == 1 ? "GET" : "SET", w->mngt_method);
+	fprintf(f, "smp attr %s (0x%x)\n ", get_attribute_name(w->smp_attr) , w->smp_attr);
 	fprintf(f, "source queue depth: %d , target queue depth: %d\n", w->source_queue_depth, w->target_queue_depth);
 }
 
@@ -549,12 +565,15 @@ void print_statistics(struct mad_worker *w, FILE *f)
 	int send_mads = 0, ok_mads = 0, errors = 0, timeouts = 0 , total_mads = 0;
 	uint64_t total_time = 0;
 	int min_latency_us = 0, max_latency_us = 0, avrg_latency_us = 0;
+	float run_time_s;
+
+	run_time_s = timedifference_sec(w->start, w->end);
 
 	for (i = 0; i < w->n_targets; ++ i) {
 
 		if (!w->targets[i].send_mads)
 			continue;
-			
+
 		send_mads += w->targets[i].send_mads;
 		ok_mads += w->targets[i].ok_mads;
 		errors += w->targets[i].errors;
@@ -572,10 +591,11 @@ void print_statistics(struct mad_worker *w, FILE *f)
 	if (total_mads > 0 )
 		avrg_latency_us = total_time / total_mads;
 
+	fprintf(f, "Run time: %.2f\n", run_time_s);
 	fprintf(f, "Local device: %s , port: %d\n", strlen(w->ibd_ca) ? w->ibd_ca : "Default", w->ibd_ca_port);
 	fprintf(f, "	send mads: %d , ok mads: %d , timeouts: %d , errors %d\n",  send_mads, ok_mads, timeouts, errors);
 	fprintf(f, "	latency (us) min: %d , max:%d , average: %d\n",  min_latency_us, max_latency_us, avrg_latency_us);
-	fprintf(f, "	mas/s: %ld\n", total_mads / (total_time / 1000000) );
+	fprintf(f, "	mas/s: %d\n", (int)(total_mads / run_time_s));
 	fprintf(f, "\n");
 
 	for (i = 0; i < w->n_targets; ++ i) {
@@ -583,7 +603,7 @@ void print_statistics(struct mad_worker *w, FILE *f)
 		fprintf(f, "lid: %d", w->targets[i].lid);
 		fprintf(f, "	send mads: %d , ok mads: %d , timeouts: %d , errors %d\n",  w->targets[i].send_mads, w->targets[i].ok_mads, w->targets[i].timeouts, w->targets[i].errors);
 		fprintf(f, "	latency (us) min: %d , max:%d , average: %d\n",  w->targets[i].min_latency_us, w->targets[i].max_latency_us, w->targets[i].avrg_latency_us);
-		fprintf(f, "	mas/s: %ld\n",  total_mads / (w->targets[i].total_time_us / 1000000));
+		fprintf(f, "	mas/s: %d\n",  (int)(total_mads / run_time_s));
 		fprintf(f, "\n");
 	}
 }
@@ -591,15 +611,85 @@ void print_statistics(struct mad_worker *w, FILE *f)
 void check_worker(const struct mad_worker *w)
 {
 	if (w->mngt_method != 1 && w->mngt_method != 2 )
-		IBPANIC("wrong mngt method : %d", w->mngt_method);
+		IBPANIC("wrong mngt method: %d", w->mngt_method);
 	if (w->target_queue_depth > MAX_TARGET_QUEUE_DEPTH)
 		IBPANIC("mad queue depth for destination device is too big: %d , max : %d", w->target_queue_depth, MAX_TARGET_QUEUE_DEPTH);
 	if (w->source_queue_depth > MAX_SOURCE_QUEUE_DEPTH)
-		IBPANIC("mad queue for local device is tool long : %d , max : %d", w->source_queue_depth, MAX_SOURCE_QUEUE_DEPTH);
+		IBPANIC("mad queue for local device is tool long: %d , max : %d", w->source_queue_depth, MAX_SOURCE_QUEUE_DEPTH);
 	if (w->mgmt_class != IB_SMI_DIRECT_CLASS && w->mgmt_class != IB_SMI_CLASS)
 		IBPANIC("wrong mngt method : %d", w->mgmt_class);
 	if (w->source_queue_depth < w->target_queue_depth)
-		IBWARN("local queue depth is lower than targetqueue depth %d < %d", w->source_queue_depth, w->target_queue_depth);
+		IBWARN("local queue depth is lower than target queue depth %d < %d", w->source_queue_depth, w->target_queue_depth);
+}
+
+const char *get_attribute_name(int attr)
+{
+	const char *res = "Unknown";
+
+	if (attr >= 0xFF00 && attr <= 0xFFFF)
+		res = "Vendor Specific";
+
+	switch (attr) {
+		case 0x002:
+			res = "Notice";
+			break;
+		case 0x0010:
+			res = "NodeDescription";
+			break;
+		case 0x0011:
+			res = "NodeInfo";
+			break;
+		case 0x0012:
+			res = "SwitchInfo";
+			break;
+		case 0x0014:
+			res = "GUIDInfo";
+			break;
+		case 0x0015:
+			res = "PortInfo";
+			break;
+		case 0x0016:
+			res = "P_KeyTable";
+			break;
+		case 0x0017:
+			res = "SLtoVLMappingTable";
+			break;
+		case 0x0018:
+			res = "VLArbitrationTable";
+			break;
+		case 0x0019:
+			res = "LinearForwardingTable";
+			break;
+		case 0x001A:
+			res = "RandomForwardingTable";
+			break;
+		case 0x001B:
+			res = "MulticastForwardingTable";
+			break;
+		case 0x001D:
+			res = "VendorSpecificMadsTable";
+			break;
+		case 0x001E:
+			res = "HierarchyInfo";
+			break;
+		case 0x0020:
+			res = "SMInfo";
+			break;
+		case 0x0030:
+			res = "VendorDiag";
+			break;
+		case 0x0031:
+			res = "LedInfo";
+			break;
+		case 0x0032:
+			res = "CableInfo";
+			break;
+		case 0x0033:
+			res = "PortInfoExtended";
+			break;
+	};
+
+	return res;
 }
 
 int main(int argc, char *argv[])
@@ -612,7 +702,8 @@ int main(int argc, char *argv[])
 
 	const struct ibdiag_opt opts[] = {
 		{"string", 's', 0, NULL, ""},
-		{"queue_depth", 'N', 1, "<queue_depth>", ""},
+		{"queue_depth", 'N', 1, "<source queue_depth>", ""},
+		{"queue_depth", 'n', 1, "<target queue_depth>", ""},
 		{"run_time", 't', 1, "<time>", ""},
 		{"mngt_method", 'm', 1, "<method>", ""},
 		{"umad_retries", 'r', 1, "<retries>", ""},
