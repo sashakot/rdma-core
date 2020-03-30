@@ -47,7 +47,7 @@
 #include <sys/time.h>
 
 #include <ibdiag_common.h>
-#include <infiniband/ibnetdisc.h>
+//#include <infiniband/ibnetdisc.h>
 
 #define MAX_TARGET_QUEUE_DEPTH 128
 #define MAX_SOURCE_QUEUE_DEPTH 1024
